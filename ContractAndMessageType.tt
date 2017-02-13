@@ -1,0 +1,44 @@
+<#@ template debug="false" hostspecific="false" language="C#" #>
+<#@ output extension=".sql" #>
+<#@ SqlModelDirective processor="SqlModelDirectiveProcessor" #>
+<#@ import namespace="System.Text" #>
+<#@ import namespace="System.Collections.Generic" #>
+/*
+ *
+ *    For information about these objects, see: *.tt file.
+ *
+ */
+<#	
+	List<String> objects = GetObjects();
+	foreach (var obj in objects)
+	{
+#>
+GO
+CREATE MESSAGE TYPE [//<#= obj.Replace("_", "/") #>_MessageType] AUTHORIZATION [dbo]
+VALIDATION = WELL_FORMED_XML;
+
+
+GO
+CREATE CONTRACT [//<#= obj.Replace("_", "/") #>_Contract] AUTHORIZATION [dbo]
+(
+	[//<#= obj.Replace("_", "/") #>_MessageType] SENT BY ANY, 
+	[//ANY/ANY/Test_MessageType] SENT BY ANY
+);
+
+
+<#
+	}
+#>
+
+<#+
+	public List<String> GetObjects()
+	{
+		List<String> objects = new List<String>();
+
+        // Put message name here 
+        // examlpe: SRC_DEST_MSGTYPE
+		objects.Add("Source_Destination_MessageType");
+
+	    return objects;
+	}
+#>

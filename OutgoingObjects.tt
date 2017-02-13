@@ -1,0 +1,148 @@
+<#@ template debug="false" hostspecific="false" language="C#" #>
+<#@ output extension=".sql" #>
+<#@ SqlModelDirective processor="SqlModelDirectiveProcessor" #>
+<#@ import namespace="System.Text" #>
+<#@ import namespace="System.Collections.Generic" #>
+/*
+ *
+ *    For information about these objects, see: *.tt file.
+ *
+ */
+<#	
+	List<String> objects = GetObjects();
+	foreach (var obj in objects)
+	{
+#>
+GO
+/* ServiceBroker -> ReadIncomingQueue */
+CREATE PROCEDURE [SB].[ReadOutgoingQueue_<#= obj #>]
+AS
+BEGIN
+	SET NOCOUNT ON;
+
+	DECLARE @conversation_handle UNIQUEIDENTIFIER,
+			@service_name SYSNAME,
+			@service_contract_name SYSNAME,
+			@message_body XML,
+			@message_type_name SYSNAME,
+			@test_message_type_name sysname = '//ANY/ANY/Test_MessageType',
+			@real_message_type_name sysname = '//<#= obj.Replace("_", "/") #>_MessageType';
+		
+	WHILE ( 1 = 1 )
+	BEGIN
+		BEGIN TRANSACTION;
+
+		BEGIN TRY
+			WAITFOR (
+					RECEIVE TOP (1) 
+							@conversation_handle = [conversation_handle],
+							@message_body = CAST([message_body] AS XML),
+							@message_type_name = [message_type_name],
+							@service_name = [service_name],
+							@service_contract_name = [service_contract_name]
+					FROM	[sb].[OutgoingQueue_<#= obj #>]
+					), TIMEOUT 1000;
+
+			IF (@@ROWCOUNT = 0 AND @@TRANCOUNT > 0)
+			BEGIN
+				ROLLBACK TRANSACTION;
+				BREAK;
+			END;
+
+			/*
+			-- Throw exception to test how error handling working.
+			RAISERROR ('Testing error handling...', 16, 1 );
+			*/
+
+			IF @message_type_name = N'http://schemas.microsoft.com/SQL/ServiceBroker/Error'
+			BEGIN
+				-- Receiver initiate "end conversation with error". Log the error and finish conversation as well.
+				EXEC [SB].[SendEmailWithServiceBrokerMessageDetails]
+					'Error message received',
+					@service_name,
+					@service_contract_name,
+					@message_type_name,
+					@message_body;
+
+			END;
+			
+			END CONVERSATION @conversation_handle;
+			
+			COMMIT TRANSACTION;
+		END TRY
+		BEGIN CATCH
+			/*
+				Test XACT_STATE for 0, 1, or -1.
+					If = -1		The transaction is uncommittable and should be rolled back.
+					If = 1		The transaction is committable.
+					If = 0		There is no active user transaction for the current request.
+			*/
+			DECLARE	@error_number INT = ERROR_NUMBER(), @error_message NVARCHAR(MAX) = ERROR_MESSAGE();
+
+			IF ( XACT_STATE() ) = -1
+			BEGIN
+				ROLLBACK TRANSACTION;
+			END;
+
+			IF ( XACT_STATE() ) = 1
+			BEGIN
+				
+				-- OptionA:	Rollback transaction & send email if error happens during processing. 
+				--			Message will stay in incoming queue. If rollback happens 5 times in a row the incoming queue will be disabled.
+				ROLLBACK TRANSACTION;
+				EXEC [SB].[SendEmailWithServiceBrokerMessageDetails]
+					'Message cannot be processed',
+					@service_name,
+					@service_contract_name,
+					@message_type_name,
+					@message_body,
+					@error_number,
+					@error_message;
+				
+				/*
+				-- OptionB:	Notify sender that message cannot be processed.
+				--			Conversation will be closed and sender should decide what to do with message (send again or nothing).
+				END CONVERSATION @conversation_handle WITH ERROR = @error_number DESCRIPTION = @error_message;
+				COMMIT;
+				*/
+			END;
+
+			BREAK;
+		END CATCH;
+	END;
+END;
+
+
+GO
+CREATE QUEUE [SB].[OutgoingQueue_<#= obj #>]
+	WITH STATUS = ON,
+		ACTIVATION (
+			STATUS = ON,
+			PROCEDURE_NAME = [SB].[ReadOutgoingQueue_<#= obj #>],
+			MAX_QUEUE_READERS = 1,
+			EXECUTE AS N'dbo'
+			),
+		 POISON_MESSAGE_HANDLING(STATUS = ON);
+
+
+GO
+CREATE SERVICE [//<#= obj.Replace("_", "/") #>_OutgoingService] AUTHORIZATION [dbo] 
+ON QUEUE [SB].[OutgoingQueue_<#= obj #>] ([//<#= obj.Replace("_", "/") #>_Contract]);
+
+
+<#
+	}
+#>
+
+<#+
+	public List<String> GetObjects()
+	{
+		List<String> objects = new List<String>();
+
+        // Put message name here 
+        // examlpe: SRC_DEST_MSGTYPE
+		objects.Add("Source_Destination_MessageType");
+
+	    return objects;
+	}
+#>
